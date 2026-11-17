@@ -1,0 +1,66 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Air65 FPV Sim</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  #hud { position: fixed; top: 8px; left: 8px; color: #0f0; font: 12px/1.35 monospace;
+         background: rgba(0,0,0,0.5); padding: 6px 8px; white-space: pre; pointer-events: none; }
+  #rates { position: fixed; top: 8px; right: 8px; color: #0f0; font: 12px/1.35 monospace;
+           background: rgba(0,0,0,0.5); padding: 6px 8px; z-index: 2; }
+  #rates table { border-collapse: collapse; }
+  #rates td, #rates th { padding: 1px 4px; text-align: right; font-weight: normal; }
+  #rates input, #pbox input[type=number] { width: 48px; background: rgba(0,0,0,0.6); color: #0f0; border: 1px solid #0a0;
+                 font: 12px monospace; text-align: right; }
+  #pause { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+           background: rgba(0,0,0,0.45); }
+  #pbox { color: #0f0; font: 14px/1.35 monospace; background: rgba(0,0,0,0.75); padding: 12px 16px;
+          min-width: 260px; max-width: calc(100vw - 32px); max-height: 90vh; overflow-y: auto; box-sizing: border-box; }
+  #ptabs { display: flex; gap: 4px; margin-bottom: 10px; flex-wrap: wrap; }
+  #ptabs button { flex: 1; }
+  #ptabs button.on { background: #0a0; color: #000; }
+  .ptab { display: none; flex-direction: column; gap: 8px; text-align: center; }
+  .ptab.on { display: flex; }
+  .ptab table { border-collapse: collapse; font-size: 12px; margin: 0 auto; }
+  .ptab td { padding: 2px 4px; text-align: left; }
+  .hint { font-size: 12px; color: #9f9; min-height: 1.4em; }
+  .row { display: flex; gap: 8px; align-items: center; justify-content: space-between; font-size: 12px; }
+  .row input[type=range] { flex: 1; accent-color: #0a0; }
+  #flash { position: fixed; top: 30%; left: 0; right: 0; text-align: center; display: none; pointer-events: none;
+           font: bold 28px monospace; text-shadow: 0 0 4px #000, 0 0 8px #000; }
+  #pause button, #rates button { background: rgba(0,0,0,0.6); color: #0f0; border: 1px solid #0a0; font: 12px monospace; cursor: pointer; padding: 3px 6px; }
+</style>
+</head>
+<body>
+<div id="hud"></div>
+<div id="rates" style="display:none"></div>
+<div id="pause"><div id="pbox">
+  <div id="ptabs">
+    <button data-tab="main" class="on">MENU</button>
+    <button data-tab="lessons">LESSONS</button>
+    <button data-tab="controls">CONTROLLER</button>
+    <button data-tab="camera">CAMERA</button>
+  </div>
+  <div class="ptab on" id="tab-main">
+    PAUSED
+    <button id="p-resume">Resume (Esc)</button>
+    <button id="p-rates">Show rates menu</button>
+    <button id="p-crash">Crashes: physics</button>
+    <button id="p-debug">Show input debug</button>
+    <button id="p-reset">Respawn (R)</button>
+    <button id="p-city">Go to city start</button>
+  </div>
+  <div class="ptab" id="tab-lessons">
+    <div class="hint">Pick a lesson to start at its first ring. Times are your best runs.</div>
+    <span id="p-lessons" style="display:flex;flex-direction:column;gap:4px"></span>
+  </div>
+  <div class="ptab" id="tab-controls"></div>
+  <div class="ptab" id="tab-camera"></div>
+</div></div>
+<div id="flash"></div>
+<script src="three.min.js"></script><!-- Three.js r128, bundled so the sim runs offline -->
+<script>if (!window.THREE) document.body.innerHTML = '<p style="color:#f44;font:16px monospace;padding:20px">three.min.js is missing - keep it in the same folder as index.html.</p>';</script>
+<script src="sim.js"></script>
+</body>
+</html>
