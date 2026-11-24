@@ -1,0 +1,5 @@
+# only the game itself is published: index.html, sim.js, three.min.js, README.md
+.claude
+*.zip
+PROMPTS.md
+.env*
