@@ -40,7 +40,8 @@ const CONFIG = {
     landingSpeed: 1.5,               // reset mode: touching down on top of something slower than this is a landing
   },
   camera: { uptiltDeg: 20, hfovDeg: 120, near: 0.01, far: 400,
-            view: 'fpv', chaseDist: 0.45, chaseHeight: 0.15 }, // view 'fpv' or 'chase' (CAMERA tab overrides)
+            fisheye: 1,                // FPV lens: 0 = flat (rectilinear, objects look small), 1 = full fisheye like real FPV cams
+            view: 'fpv', chaseDist: 0.45, chaseHeight: 0.15, chaseFovDeg: 90 }, // view 'fpv' or 'chase' (CAMERA tab overrides)
   gravity: 9.81,
   physicsHz: 500,
   world: {
@@ -294,13 +295,14 @@ function isFree(pos, size, m = 0.3) {
 const trees = [];
 for (const [x, z] of treeSpots) {
   const sc = 0.8 + rnd() * 0.5;
-  const trunk = [[x, 0.15 + sc, z], [0.4 * sc, 2 * sc, 0.4 * sc]], crown = [[x, 0.15 + 2.7 * sc, z], [2.2 * sc, 2.2 * sc, 2.2 * sc]];
-  if (!clearOfRings(x, z, 3.8 * sc, 1.1 * sc) || !isFree(...trunk) || !isFree(...crown)) continue;
+  // street tree ~6-8 m tall: 3.2 m trunk, ~3.8 m wide crown
+  const trunk = [[x, 0.15 + 1.6 * sc, z], [0.44 * sc, 3.2 * sc, 0.44 * sc]], crown = [[x, 0.15 + 4.6 * sc, z], [3.8 * sc, 3.8 * sc, 3.8 * sc]];
+  if (!clearOfRings(x, z, 6.5 * sc, 1.9 * sc) || !isFree(...trunk) || !isFree(...crown)) continue;
   trees.push({ pos: [x, 0.15, z], s: sc, rotY: rnd() * 6 });
   addBoxCollider(...trunk); addBoxCollider(...crown);
 }
-instanced(new THREE.CylinderGeometry(0.15, 0.2, 2, 5).translate(0, 1, 0), new THREE.MeshLambertMaterial({ color: 0x6b4a2a }), trees);
-instanced(new THREE.IcosahedronGeometry(1.1, 0).translate(0, 2.7, 0), new THREE.MeshLambertMaterial({ color: 0x3f7a35, flatShading: true }), trees);
+instanced(new THREE.CylinderGeometry(0.16, 0.22, 3.2, 5).translate(0, 1.6, 0), new THREE.MeshLambertMaterial({ color: 0x6b4a2a }), trees);
+instanced(new THREE.IcosahedronGeometry(1.9, 0).translate(0, 4.6, 0), new THREE.MeshLambertMaterial({ color: 0x3f7a35, flatShading: true }), trees);
 
 const cars = [], carColors = [0xc03030, 0x2050b0, 0xe0e0e0, 0x202020, 0xd0b020, 0x708090];
 for (let k = -C.blocks; k <= C.blocks; k++) for (let b = -C.blocks; b < C.blocks; b++) for (const alongZ of [true, false]) {
@@ -401,7 +403,7 @@ const clearings = Array.from({ length: S.clearings }, () => [S.roadX + 25 + rnd(
 {
   const pines = [];
   for (let i = 0; i < S.trees; i++) {
-    const x = S.roadX + 8 + rnd() * (sHalf - S.roadX - 10), z = -sHalf + 5 + rnd() * (S.size - 45), sc = 0.8 + rnd() * 0.9;
+    const x = S.roadX + 8 + rnd() * (sHalf - S.roadX - 10), z = -sHalf + 5 + rnd() * (S.size - 45), sc = 1.3 + rnd() * 1.0; // pines ~10-18 m tall
     if (clearings.some(([cx, cz, r]) => Math.hypot(x - cx, z - cz) < r)) continue;
     const trunk = [[x, 1.5 * sc, z], [0.4 * sc, 3 * sc, 0.4 * sc]], crown = [[x, 5 * sc, z], [3 * sc, 6 * sc, 3 * sc]];
     if (!isFree(...trunk, 0.2) || !isFree(...crown, 0)) continue;
@@ -469,12 +471,52 @@ const quadModel = new THREE.Group(); quadModel.visible = false; scene.add(quadMo
   const cam = new THREE.Mesh(new THREE.BoxGeometry(0.01, 0.01, 0.008), ductMat); cam.position.set(0, 0.008, -0.012); quadModel.add(cam);
 }
 const chasePos = new THREE.Vector3(), chaseFwd = new THREE.Vector3(0, 0, -1);
+// ---- FPV lens ----
+// A plain (rectilinear) 120° projection shrinks the middle of the image and stretches the edges, so
+// everything ahead looks tiny and far away. Real FPV cameras use a fisheye lens: the centre is shown at
+// close to natural size and the edges are squeezed. We render a wide rectilinear image, then remap it.
+const lensRT = new THREE.WebGLRenderTarget(1, 1);
+const lensMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: lensRT.texture }, halfH: { value: 1 }, tanH: { value: 1 }, tanHr: { value: 1 }, tanVr: { value: 1 }, aspect: { value: 1 }, k: { value: 1 } },
+  vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+  fragmentShader: `
+    uniform sampler2D tex; uniform float halfH, tanH, tanHr, tanVr, aspect, k; varying vec2 vUv;
+    void main(){
+      vec2 p = vec2(vUv.x * 2.0 - 1.0, (vUv.y * 2.0 - 1.0) / aspect);    // same angular scale on both axes
+      float r = max(length(p), 1e-6);
+      float th = mix(atan(r * tanH), r * halfH, k);                       // k=0 rectilinear, k=1 equidistant fisheye
+      vec2 d = p / r; float t = tan(min(th, 1.55));
+      vec2 uv = 0.5 + 0.5 * vec2(d.x * t / tanHr, d.y * t / tanVr);
+      if (th > 1.55 || uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+      else gl_FragColor = texture2D(tex, uv);
+    }`,
+  depthTest: false, depthWrite: false,
+});
+const lensScene = new THREE.Scene(), lensCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+lensScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), lensMat));
+let lensOn = false;
 function resize() {
-  const a = innerWidth / innerHeight;
+  const a = innerWidth / innerHeight, c = CONFIG.camera, halfH = (c.view === 'chase' ? c.chaseFovDeg : c.hfovDeg) * Math.PI / 360;
   renderer.setSize(innerWidth, innerHeight);
   camera.aspect = a;
-  camera.fov = 2 * Math.atan(Math.tan(CONFIG.camera.hfovDeg * Math.PI / 360) / a) * 180 / Math.PI;
+  lensOn = c.view === 'fpv' && c.fisheye > 0;
+  let tanHr = Math.tan(halfH);
+  if (lensOn) {
+    // widest angle the lens shows (the screen corner), capped where a rectilinear render falls apart
+    const rc = Math.hypot(1, 1 / a), thc = (1 - c.fisheye) * Math.atan(rc * Math.tan(halfH)) + c.fisheye * rc * halfH;
+    tanHr = Math.tan(Math.min(thc, 80 * Math.PI / 180)) / rc;
+    const u = lensMat.uniforms; u.halfH.value = halfH; u.tanH.value = Math.tan(halfH); u.tanHr.value = tanHr; u.tanVr.value = tanHr / a;
+    u.aspect.value = a; u.k.value = c.fisheye;
+    const px = renderer.getPixelRatio(), sc = Math.min(1.6, 4096 / (innerWidth * px));
+    lensRT.setSize(Math.round(innerWidth * px * sc), Math.round(innerHeight * px * sc));
+  }
+  camera.fov = 2 * Math.atan(tanHr / a) * 180 / Math.PI;
   camera.updateProjectionMatrix();
+}
+function renderView() {
+  if (!lensOn) { renderer.render(scene, camera); return; }
+  renderer.setRenderTarget(lensRT); renderer.render(scene, camera);
+  renderer.setRenderTarget(null); renderer.render(lensScene, lensCam);
 }
 addEventListener('resize', resize); resize();
 
@@ -671,8 +713,9 @@ function collide(dt = 1 / CONFIG.physicsHz) {
     }
     if (c.ring) {
       tmp.copy(p).sub(c.pos).applyQuaternion(c.qInv);
-      const rho = Math.hypot(tmp.x, tmp.y) || 1e-6;
-      lc.set(tmp.x / rho * c.r, tmp.y / rho * c.r, 0);             // nearest point on the ring's centre circle
+      const rho = Math.hypot(tmp.x, tmp.y);
+      if (rho < 1e-6) lc.set(c.r, 0, 0);                            // dead centre: every point of the ring is equally far
+      else lc.set(tmp.x / rho * c.r, tmp.y / rho * c.r, 0);         // nearest point on the ring's centre circle
       tmp.sub(lc); const d = tmp.length();
       if (d >= c.tube + r || d < 1e-9) continue;
       cn.copy(tmp).multiplyScalar(1 / d).applyQuaternion(c.q);
@@ -863,7 +906,7 @@ buildControls();
 const camEl = document.getElementById('tab-camera');
 function saveCamera() {
   const c = CONFIG.camera;
-  try { localStorage.setItem('air65-camera', JSON.stringify({ uptiltDeg: c.uptiltDeg, hfovDeg: c.hfovDeg, view: c.view })); } catch (e) {}
+  try { localStorage.setItem('air65-camera', JSON.stringify({ uptiltDeg: c.uptiltDeg, hfovDeg: c.hfovDeg, fisheye: c.fisheye, view: c.view })); } catch (e) {}
 }
 function buildCamera() {
   const c = CONFIG.camera;
@@ -872,18 +915,21 @@ function buildCamera() {
     `<button data-view="chase">${c.view === 'chase' ? '[CHASE]' : 'CHASE'}</button></span></div>` +
     `<div class="row">Uptilt <input type="range" id="cam-tilt" min="0" max="60" step="1" value="${c.uptiltDeg}"><span id="cam-tilt-v">${c.uptiltDeg}°</span></div>` +
     `<div class="row">FOV <input type="range" id="cam-fov" min="80" max="160" step="1" value="${c.hfovDeg}"><span id="cam-fov-v">${c.hfovDeg}°</span></div>` +
-    `<div class="hint">Uptilt applies to the FPV camera. V key toggles view while flying.</div>` +
+    `<div class="row">Fisheye <input type="range" id="cam-fish" min="0" max="100" step="5" value="${Math.round(c.fisheye * 100)}"><span id="cam-fish-v">${Math.round(c.fisheye * 100)}%</span></div>` +
+    `<div class="hint">Uptilt, FOV and fisheye apply to the FPV camera. Real FPV lenses are fisheye: 0% is a flat lens that makes things look small and far away. V key toggles view while flying.</div>` +
     `<button id="cam-defaults">Reset to CONFIG defaults</button>`;
   camEl.querySelectorAll('[data-view]').forEach(b => b.onclick = () => setView(b.dataset.view));
   const tilt = document.getElementById('cam-tilt'), fov = document.getElementById('cam-fov');
   tilt.oninput = () => { c.uptiltDeg = +tilt.value; document.getElementById('cam-tilt-v').textContent = c.uptiltDeg + '°'; updateTilt(); saveCamera(); };
   fov.oninput = () => { c.hfovDeg = +fov.value; document.getElementById('cam-fov-v').textContent = c.hfovDeg + '°'; resize(); saveCamera(); };
+  const fish = document.getElementById('cam-fish');
+  fish.oninput = () => { c.fisheye = fish.value / 100; document.getElementById('cam-fish-v').textContent = fish.value + '%'; resize(); saveCamera(); };
   document.getElementById('cam-defaults').onclick = () => {
     Object.assign(c, JSON.parse(JSON.stringify(CAMERA_DEFAULTS))); try { localStorage.removeItem('air65-camera'); } catch (e) {}
     updateTilt(); resize(); setView(c.view);
   };
 }
-function setView(v) { CONFIG.camera.view = v; chasePos.copy(s.pos); saveCamera(); buildCamera(); }
+function setView(v) { CONFIG.camera.view = v; chasePos.copy(s.pos); resize(); saveCamera(); buildCamera(); }
 addEventListener('keydown', e => { if (e.target.tagName !== 'INPUT' && (e.key === 'v' || e.key === 'V')) setView(CONFIG.camera.view === 'fpv' ? 'chase' : 'fpv'); });
 buildCamera();
 
@@ -985,7 +1031,7 @@ function frame(now) {
     camera.position.copy(s.pos);
     camera.quaternion.copy(s.q).multiply(tiltQ);
   }
-  renderer.render(scene, camera);
+  renderView();
 
   const pad = inp.pad;
   let t = `${s.armed ? 'ARMED' : (inp.armSwitch ? 'ARM SW ON - LOWER THROTTLE' : 'DISARMED')}\n`;
