@@ -63,6 +63,16 @@ const CONFIG = {
     },
     boxes: [],                        // extra obstacles: { pos: [x,y,z], size: [w,h,d] }
     ringTube: 0.06,                   // ring tube thickness as fraction of ring radius
+    strike: {                         // STRIKE map (MAPS tab): find soldiers and fly into them
+      size: 300,                      // m square
+      roadX: 20,                      // dirt road along z; town is west of it, forest east
+      townPitch: 22,                  // spacing of the ruined buildings
+      trees: 2600,                    // pine placement attempts (overlaps are skipped)
+      clearings: 6,
+      soldiersTown: 12, soldiersForest: 12,
+      hitPadding: 0.15,               // m added around a soldier for a hit to count
+      launch: [20, 0, 140],           // launch point on the road at the south edge, facing north
+    },
   },
 };
 
@@ -82,10 +92,14 @@ scene.add(new THREE.HemisphereLight(0xffffff, 0x404040, 0.8));
 const sun = new THREE.DirectionalLight(0xffffff, 0.6); sun.position.set(3, 5, 2); scene.add(sun);
 
 scene.background = new THREE.Color(0x87a8c8);
+scene.fog = new THREE.Fog(0x87a8c8, 80, 350);
+// each map lives in its own group with its own collision grid; switching maps swaps both
+const cityRoot = new THREE.Group(), strikeRoot = new THREE.Group();
+scene.add(cityRoot, strikeRoot); strikeRoot.visible = false;
+let root = cityRoot;
 const floor = new THREE.Mesh(new THREE.PlaneGeometry(W.floorSize, W.floorSize),
   new THREE.MeshLambertMaterial({ color: 0x3a3d42 }));
-floor.rotation.x = -Math.PI / 2; scene.add(floor);
-scene.fog = new THREE.Fog(0x87a8c8, 80, 350);
+floor.rotation.x = -Math.PI / 2; root.add(floor);
 
 // --- city ---
 const C = W.city, pitch = C.blockSize + C.streetWidth, half = C.blockSize / 2;
@@ -99,11 +113,12 @@ function instanced(geo, mat, list) {          // list: [{ pos, rotY, s, color }]
     dummy.updateMatrix(); m.setMatrixAt(i, dummy.matrix);
     if (it.color !== undefined) m.setColorAt(i, tmpColor.setHex(it.color));
   });
-  m.count = list.length; scene.add(m); return m;
+  m.count = list.length; root.add(m); return m;
 }
 
 // collision grid (xz cells) so per-step checks only touch nearby objects
-const CELL = 8, cgrid = new Map(), ckey = (ix, iz) => ix * 65536 + iz;
+const CELL = 8, ckey = (ix, iz) => ix * 65536 + iz, cityGrid = new Map(), strikeGrid = new Map();
+let cgrid = cityGrid;
 function addCollider(c, min, max) {
   const r = CONFIG.quad.radius;
   for (let ix = Math.floor((min.x - r) / CELL); ix <= Math.floor((max.x + r) / CELL); ix++)
@@ -186,7 +201,7 @@ for (let k = -C.blocks; k <= C.blocks; k++) for (let n = 0; n < nPer; n++) {
   dm.rotation.set(0, 0, 0); dm.position.set(k * pitch, 0.01, t); dm.updateMatrix(); dashes.setMatrixAt(di++, dm.matrix);
   dm.rotation.set(0, Math.PI / 2, 0); dm.position.set(t, 0.01, k * pitch); dm.updateMatrix(); dashes.setMatrixAt(di++, dm.matrix);
 }
-scene.add(dashes);
+root.add(dashes);
 // window texture
 const cv = document.createElement('canvas'); cv.width = cv.height = 64;
 const cx = cv.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, 64, 64);
@@ -232,9 +247,9 @@ for (let bx = -C.blocks; bx < C.blocks; bx++) for (let bz = -C.blocks; bz < C.bl
   }
 }
 W.boxes.forEach(b => addPart(b.pos, b.size, 0xc0743a));
-(function mergeBuildings() {
+function mergeParts(parts) {
   const P = [], N = [], U = [], Cl = [], col = new THREE.Color(), roof = new THREE.Color(), s = 1 / 7;
-  for (const b of bparts) {
+  for (const b of parts) {
     const [w, h, d] = b.size, g = new THREE.BoxGeometry(w, h, d), uv = g.attributes.uv;
     const dims = [[d, h], [d, h], [0, 0], [0, 0], [w, h], [w, h]];  // roof/floor get plain UV (0,0)
     for (let f = 0; f < 6; f++) for (let v = 0; v < 4; v++) {
@@ -253,8 +268,9 @@ W.boxes.forEach(b => addPart(b.pos, b.size, 0xc0743a));
   g.setAttribute('normal', new THREE.Float32BufferAttribute(N, 3));
   g.setAttribute('uv', new THREE.Float32BufferAttribute(U, 2));
   g.setAttribute('color', new THREE.Float32BufferAttribute(Cl, 3));
-  scene.add(new THREE.Mesh(g, new THREE.MeshLambertMaterial({ map: winTex, vertexColors: true })));
-})();
+  root.add(new THREE.Mesh(g, new THREE.MeshLambertMaterial({ map: winTex, vertexColors: true })));
+}
+mergeParts(bparts);
 instanced(new THREE.BoxGeometry(C.blockSize, 0.15, C.blockSize).translate(0, 0.075, 0), walkMat, curbs); // no collision
 
 // ---- trees, cars, people (instanced, box colliders) ----
@@ -325,15 +341,114 @@ ringSpecs.forEach((rs, i) => {
   c.q = q; rs.c = c;
   const e = rs.r + c.tube; addCollider(c, c.pos.clone().subScalar(e), c.pos.clone().addScalar(e));
 });
-dummy.quaternion.identity(); scene.add(ringMesh);
+dummy.quaternion.identity(); root.add(ringMesh);
 for (const l of labels) {
   const cvs = document.createElement('canvas'); cvs.width = 512; cvs.height = 96;
   const g = cvs.getContext('2d'); g.fillStyle = 'rgba(0,0,0,0.6)'; g.fillRect(0, 0, 512, 96);
   g.font = 'bold 52px monospace'; g.textAlign = 'center'; g.textBaseline = 'middle';
   g.fillStyle = '#' + l.color.toString(16).padStart(6, '0'); g.fillText(l.name, 256, 50);
   const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(cvs) }));
-  sp.scale.set(5, 0.94, 1); sp.position.set(l.ring.pos[0], l.ring.pos[1] + l.ring.r + 1.2, l.ring.pos[2]); scene.add(sp);
+  sp.scale.set(5, 0.94, 1); sp.position.set(l.ring.pos[0], l.ring.pos[1] + l.ring.r + 1.2, l.ring.pos[2]); root.add(sp);
 }
+
+// ================= STRIKE MAP: urban ruins (west) + forest (east), hidden soldiers =================
+const S = W.strike;
+root = strikeRoot; cgrid = strikeGrid;
+{
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(W.floorSize, W.floorSize), new THREE.MeshLambertMaterial({ color: 0x5a5a3c }));
+  ground.rotation.x = -Math.PI / 2; root.add(ground);
+  // dirt road from the launch point north, splitting the town and the forest
+  const road = new THREE.Mesh(new THREE.PlaneGeometry(8, S.size).rotateX(-Math.PI / 2), new THREE.MeshLambertMaterial({ color: 0x6e5f46 }));
+  road.position.set(S.roadX, 0.01, 0); root.add(road);
+}
+const strikeParts = [], ruinTints = [0x8a8478, 0x9a948a, 0x7a746c, 0xa49c8e, 0x6c6660];
+const sHalf = S.size / 2;
+// --- urban section: small blocks of low, damaged buildings with gaps, walls and rubble ---
+{
+  const add = (pos, size, color) => { strikeParts.push({ pos, size, color }); addBoxCollider(pos, size); };
+  for (let x = -sHalf + 10; x < S.roadX - 24; x += S.townPitch) for (let z = -sHalf + 10; z < sHalf - 30; z += S.townPitch) {
+    if (rnd() < 0.15) continue;                                   // open lot
+    const w = 8 + rnd() * 8, d = 8 + rnd() * 8, h = 3 + rnd() * (rnd() < 0.2 ? 16 : 7);
+    const cx = x + rnd() * 3, cz = z + rnd() * 3, col = pick(ruinTints);
+    if (rnd() < 0.35) {                                           // bombed-out shell: walls only, open roof
+      const t = 0.5, hh = h * (0.5 + rnd() * 0.5);
+      add([cx, hh / 2, cz - d / 2 + t / 2], [w, hh, t], col); add([cx, hh / 2, cz + d / 2 - t / 2], [w, hh * 0.6, t], col);
+      add([cx - w / 2 + t / 2, hh / 2, cz], [t, hh * 0.8, d - 2 * t], col);
+    } else {
+      const holeY = 1 + rnd() * Math.max(0.1, h - 5);
+      const hole = h > 6 && rnd() < 0.4 ? { axis: rnd() < 0.5 ? 'x' : 'z', y1: holeY, y2: holeY + 2.5 } : null;
+      const saved = bparts.length; addBuilding(cx, cz, w, d, h, col, hole);
+      strikeParts.push(...bparts.splice(saved));                  // addBuilding wrote into the city list; move it
+    }
+    for (let k = 0; k < 3; k++) {                                 // rubble piles
+      const rx = cx + (rnd() - 0.5) * (w + 6), rz = cz + (rnd() - 0.5) * (d + 6), rs = 0.6 + rnd() * 1.4;
+      if (isFree([rx, rs / 2, rz], [rs * 1.5, rs, rs])) add([rx, rs / 2, rz], [rs * 1.5, rs, rs], 0x77706a);
+    }
+  }
+  mergeParts(strikeParts);
+  // burned-out vehicles along the road edge
+  const wrecks = [];
+  for (let z = -sHalf + 20; z < sHalf - 40; z += 18 + rnd() * 20) {
+    const x = S.roadX + (rnd() < 0.5 ? -5.5 : 5.5), box = [[x, 0.825, z], [1.8, 1.65, 4.2]];
+    if (!isFree(...box, 0.8)) continue;
+    wrecks.push({ pos: [x, 0, z], rotY: (rnd() - 0.5) * 0.6, color: 0x2a2622 }); addBoxCollider(...box);
+  }
+  instanced(new THREE.BoxGeometry(1.8, 0.9, 4.2).translate(0, 0.6, 0), new THREE.MeshLambertMaterial({ color: 0xffffff }), wrecks);
+  instanced(new THREE.BoxGeometry(1.6, 0.6, 2.2).translate(0, 1.35, -0.2), new THREE.MeshLambertMaterial({ color: 0x151515 }), wrecks);
+}
+// --- forest section: dense pines with a few clearings ---
+const clearings = Array.from({ length: S.clearings }, () => [S.roadX + 25 + rnd() * (sHalf - S.roadX - 40), -sHalf + 20 + rnd() * (S.size - 70), 8 + rnd() * 8]);
+{
+  const pines = [];
+  for (let i = 0; i < S.trees; i++) {
+    const x = S.roadX + 8 + rnd() * (sHalf - S.roadX - 10), z = -sHalf + 5 + rnd() * (S.size - 45), sc = 0.8 + rnd() * 0.9;
+    if (clearings.some(([cx, cz, r]) => Math.hypot(x - cx, z - cz) < r)) continue;
+    const trunk = [[x, 1.5 * sc, z], [0.4 * sc, 3 * sc, 0.4 * sc]], crown = [[x, 5 * sc, z], [3 * sc, 6 * sc, 3 * sc]];
+    if (!isFree(...trunk, 0.2) || !isFree(...crown, 0)) continue;
+    pines.push({ pos: [x, 0, z], s: sc, rotY: rnd() * 6 }); addBoxCollider(...trunk); addBoxCollider(...crown);
+  }
+  instanced(new THREE.CylinderGeometry(0.15, 0.22, 3, 5).translate(0, 1.5, 0), new THREE.MeshLambertMaterial({ color: 0x5a3e24 }), pines);
+  instanced(new THREE.ConeGeometry(1.5, 6, 6).translate(0, 5, 0), new THREE.MeshLambertMaterial({ color: 0x2f5a2a, flatShading: true }), pines);
+}
+// --- soldiers: half in town, half in the forest; colliders are tagged so a hit counts ---
+const soldiers = [];
+{
+  const place = (x, z) => {
+    const box = [[x, 0.9, z], [0.6, 1.8, 0.6]];
+    if (!isFree(...box, 0.4) || Math.hypot(x - S.launch[0], z - S.launch[2]) < 40) return false;
+    const c = { min: new THREE.Vector3(x - 0.3, 0, z - 0.3), max: new THREE.Vector3(x + 0.3, 1.8, z + 0.3), soldier: soldiers.length };
+    addCollider(c, c.min, c.max); soldiers.push({ pos: [x, 0, z], rotY: rnd() * 6, alive: true, area: x < S.roadX ? 'town' : 'forest' });
+    return true;
+  };
+  for (let n = 0, tries = 0; n < S.soldiersTown && tries < 5000; tries++)
+    if (place(-sHalf + 8 + rnd() * (S.roadX - 12 + sHalf - 8), -sHalf + 8 + rnd() * (S.size - 50))) n++;
+  for (let n = 0, tries = 0; n < S.soldiersForest && tries < 5000; tries++) {
+    const cl = rnd() < 0.4 ? pick(clearings) : null;             // some in clearings, most under the trees
+    const x = cl ? cl[0] + (rnd() - 0.5) * cl[2] : S.roadX + 10 + rnd() * (sHalf - S.roadX - 14);
+    const z = cl ? cl[1] + (rnd() - 0.5) * cl[2] : -sHalf + 8 + rnd() * (S.size - 50);
+    if (place(x, z)) n++;
+  }
+}
+const olive = new THREE.MeshLambertMaterial({ color: 0x4b5320 });
+const soldierMeshes = [
+  instanced(new THREE.BoxGeometry(0.45, 1.3, 0.3).translate(0, 0.65, 0), olive, soldiers),                                                         // body
+  instanced(new THREE.BoxGeometry(0.3, 0.22, 0.3).translate(0, 1.47, 0), new THREE.MeshLambertMaterial({ color: 0xc8a07a }), soldiers),            // face
+  instanced(new THREE.BoxGeometry(0.36, 0.14, 0.36).translate(0, 1.64, 0), new THREE.MeshLambertMaterial({ color: 0x3a4018 }), soldiers),          // helmet
+  instanced(new THREE.BoxGeometry(0.06, 0.08, 0.8).translate(0.25, 1.0, -0.2), new THREE.MeshLambertMaterial({ color: 0x1a1a1a }), soldiers),      // rifle
+];
+function hideSoldier(i, hidden) {
+  const it = soldiers[i]; dummy.position.set(...it.pos); dummy.rotation.set(0, it.rotY, 0); dummy.scale.setScalar(hidden ? 0 : 1); dummy.updateMatrix();
+  for (const m of soldierMeshes) { m.setMatrixAt(i, dummy.matrix); m.instanceMatrix.needsUpdate = true; }
+  dummy.scale.setScalar(1);
+}
+// impact fireball (one reused sprite)
+const boomCv = document.createElement('canvas'); boomCv.width = boomCv.height = 64;
+{ const g = boomCv.getContext('2d'), gr = g.createRadialGradient(32, 32, 2, 32, 32, 32);
+  gr.addColorStop(0, '#fff6c0'); gr.addColorStop(0.4, '#ff9a20'); gr.addColorStop(1, 'rgba(80,30,0,0)'); g.fillStyle = gr; g.fillRect(0, 0, 64, 64); }
+const boom = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(boomCv), transparent: true, depthWrite: false }));
+boom.visible = false; root.add(boom);
+const strikeSpawn = { pos: new THREE.Vector3(S.launch[0], CONFIG.quad.radius + 0.001, S.launch[2]), q: new THREE.Quaternion() };
+root = cityRoot; cgrid = cityGrid;
 
 const camera = new THREE.PerspectiveCamera(60, 1, CONFIG.camera.near, CONFIG.camera.far);
 const tiltQ = new THREE.Quaternion();
@@ -370,7 +485,7 @@ const s = {
   w: [0, 0, 0], aa: [0, 0, 0], thrust: 0, armed: false,
 };
 const citySpawn = { pos: new THREE.Vector3(...W.start), q: new THREE.Quaternion() };
-let spawn = citySpawn;
+let spawn = citySpawn, currentMap = 'city';
 function reset() {
   s.pos.copy(spawn.pos); s.vel.set(0, 0, 0); s.q.copy(spawn.q);
   s.w = [0, 0, 0]; s.aa = [0, 0, 0]; s.thrust = 0; s.armed = false;
@@ -511,7 +626,7 @@ function step(dt) {
   prevPos.copy(s.pos);
   s.pos.addScaledVector(s.vel, dt);
   simTime += dt;
-  checkRings();
+  if (currentMap === 'city') checkRings();
 
   axis.set(s.w[0], s.w[1], s.w[2]);
   const wm = axis.length();
@@ -524,6 +639,7 @@ function step(dt) {
 const cn = new THREE.Vector3(), cvt = new THREE.Vector3();
 let touching = false;
 let resetHit = false;                        // reset mode: set when a contact counts as a crash
+let soldierHit = -1;                         // strike map: index of a soldier touched this step
 function contact(depth, dt) {                 // cn = world contact normal (unit, pointing out of the obstacle)
   const K = CONFIG.crash;
   if (K.mode === 'reset' && (cn.y < 0.7 || -s.vel.dot(cn) > K.landingSpeed)) resetHit = true; // wall/ring/edge or hard landing
@@ -546,6 +662,13 @@ function collide(dt = 1 / CONFIG.physicsHz) {
   if (p.y < r) { cn.set(0, 1, 0); hardest = Math.max(hardest, contact(r - p.y, dt)); }
   const cell = cgrid.get(ckey(Math.floor(p.x / CELL), Math.floor(p.z / CELL)));
   if (cell) for (const c of cell) {
+    if (c.soldier !== undefined) {                 // soldiers don't push back: touching one is a hit
+      if (soldiers[c.soldier].alive) {
+        tmp.copy(p).clamp(c.min, c.max); const pr = r + W.strike.hitPadding;
+        if (tmp.distanceToSquared(p) < pr * pr) soldierHit = c.soldier;
+      }
+      continue;
+    }
     if (c.ring) {
       tmp.copy(p).sub(c.pos).applyQuaternion(c.qInv);
       const rho = Math.hypot(tmp.x, tmp.y) || 1e-6;
@@ -616,7 +739,7 @@ const pDebug = document.getElementById('p-debug');
 function setDebug(v) { showDebug = v; pDebug.textContent = v ? 'Hide input debug' : 'Show input debug'; }
 document.getElementById('p-resume').onclick = () => setPaused(false);
 document.getElementById('p-reset').onclick = () => { reset(); setPaused(false); };
-document.getElementById('p-city').onclick = () => { spawn = citySpawn; reset(); setPaused(false); };
+document.getElementById('p-city').onclick = () => { if (currentMap !== 'city') setMap('city'); spawn = citySpawn; reset(); setPaused(false); };
 const pCrash = document.getElementById('p-crash');
 function setCrashMode(m) {
   CONFIG.crash.mode = m;
@@ -634,7 +757,7 @@ function buildLessonMenu() {
     const b = document.createElement('button');
     b.textContent = L.name + (bests[L.name] ? `  ${bests[L.name].toFixed(2)}s` : '');
     b.style.color = '#' + L.color.toString(16).padStart(6, '0');
-    b.onclick = () => { spawn = L.spawn; reset(); setPaused(false); };
+    b.onclick = () => { if (currentMap !== 'city') setMap('city'); spawn = L.spawn; reset(); setPaused(false); };
     el.appendChild(b);
   });
 }
@@ -765,10 +888,65 @@ addEventListener('keydown', e => { if (e.target.tagName !== 'INPUT' && (e.key ==
 buildCamera();
 
 // ---------- Loop ----------
+// ---------- Maps & strike mission ----------
+const STRIKE_KEY = 'STRIKE MISSION';
+const mission = { t0: 0, hits: 0, done: false, endT: 0 };
+const fmtTime = t => `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, '0')}`;
+function restartMission() {
+  soldiers.forEach((sd, i) => { sd.alive = true; hideSoldier(i, false); });
+  mission.t0 = simTime; mission.hits = 0; mission.done = false;
+}
+function setMap(m) {
+  currentMap = m; cityRoot.visible = m === 'city'; strikeRoot.visible = m === 'strike';
+  cgrid = m === 'city' ? cityGrid : strikeGrid; spawn = m === 'city' ? citySpawn : strikeSpawn;
+  cancelRun(); if (m === 'strike') restartMission();
+  signalLostUntil = 0; staticEl.style.display = 'none'; boom.visible = false;
+  reset(); buildMaps();
+  try { localStorage.setItem('air65-map', m); } catch (e) {}
+}
+// a hit: fireball, the FPV feed cuts to static, then the next drone launches from the road
+let signalLostUntil = 0, boomUntil = 0;
+const staticEl = document.getElementById('static'), staticCv = staticEl.querySelector('canvas'), staticCtx = staticCv.getContext('2d');
+const staticImg = staticCtx.createImageData(staticCv.width, staticCv.height);
+function onSoldierHit(i, now) {
+  soldiers[i].alive = false; hideSoldier(i, true); mission.hits++;
+  boom.position.copy(s.pos); boom.scale.setScalar(5); boom.visible = true; boomUntil = now + 700;
+  signalLostUntil = now + 1100; staticEl.style.display = 'flex';
+  if (mission.hits === soldiers.length) {
+    mission.done = true; mission.endT = simTime - mission.t0;
+    const b = bests[STRIKE_KEY], nb = !b || mission.endT < b;
+    if (nb) { bests[STRIKE_KEY] = mission.endT; try { localStorage.setItem('air65-bests', JSON.stringify(bests)); } catch (e) {} }
+    flash(`MISSION COMPLETE  ${fmtTime(mission.endT)}${nb ? '  NEW BEST' : `  (best ${fmtTime(b)})`}`, 0x40ff40, 5);
+    buildMaps();
+  } else flash(`TARGET HIT  ${mission.hits}/${soldiers.length}`, 0xffa020, 1.6);
+}
+function updateStrikeFx(now) {
+  if (boom.visible && now > boomUntil) boom.visible = false;
+  if (!signalLostUntil) return;
+  if (now < signalLostUntil) {                 // hold the sim and draw noise
+    acc = 0; const d = staticImg.data;
+    for (let i = 0; i < d.length; i += 4) { const v = Math.random() * 255; d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255; }
+    staticCtx.putImageData(staticImg, 0, 0);
+  } else { signalLostUntil = 0; staticEl.style.display = 'none'; reset(); }
+}
+const mapsEl = document.getElementById('tab-maps');
+function buildMaps() {
+  const b = bests[STRIKE_KEY];
+  mapsEl.innerHTML =
+    `<button data-map-sel="city">${currentMap === 'city' ? '[CITY TRAINING]' : 'City training'}</button>` +
+    `<button data-map-sel="strike">${currentMap === 'strike' ? '[STRIKE MISSION]' : 'Strike mission'}</button>` +
+    `<div class="hint">STRIKE: ${soldiers.length} soldiers are hidden in the ruined town (west of the road) and the pine forest (east). ` +
+    `Find them and fly into them. Each hit expends the drone; the next one launches from the road.</div>` +
+    `<div class="hint">Best mission time: ${b ? fmtTime(b) : '-'}</div>` +
+    (currentMap === 'strike' ? `<button id="m-restart">Restart mission</button>` : '');
+  mapsEl.querySelectorAll('[data-map-sel]').forEach(el => el.onclick = () => { setMap(el.dataset.mapSel); setPaused(false); });
+  const rb = document.getElementById('m-restart'); if (rb) rb.onclick = () => { restartMission(); reset(); setPaused(false); };
+}
+
 const hud = document.getElementById('hud');
 const DT = 1 / CONFIG.physicsHz;
 let acc = 0, last = performance.now();
-reset();
+{ let m = 'city'; try { m = localStorage.getItem('air65-map') === 'strike' ? 'strike' : 'city'; } catch (e) {} setMap(m); }
 
 function frame(now) {
   requestAnimationFrame(frame);
@@ -779,14 +957,16 @@ function frame(now) {
 
   while (acc >= DT) {
     acc -= DT;
-    resetHit = false;
+    resetHit = false; soldierHit = -1;
     const hard = step(DT);
+    if (soldierHit >= 0) { onSoldierHit(soldierHit, now); acc = 0; break; }
     if (resetHit) { flash('CRASH', 0xff4040, 0.8); reset(); acc = 0; break; }
     if (hard) { flash(run.li >= 0 ? 'CRASH - lesson failed' : 'CRASH', 0xff4040, 1.2); cancelRun(); }
     else if (touching && s.vel.lengthSq() < 0.01 && up.set(0, 1, 0).applyQuaternion(s.q).y < -0.3 && !flashUntil)
       flash('UPSIDE DOWN - press R', 0xffa040, 1.5);
   }
   if (flashUntil && now > flashUntil) { flashEl.style.display = 'none'; flashUntil = 0; }
+  updateStrikeFx(now);
 
   if (paused) { updateMapping(inp.pad); updateControlsLive(inp.pad); }
 
@@ -813,6 +993,12 @@ function frame(now) {
   if (run.li >= 0) {
     const L = lessons[run.li], b = bests[L.name];
     t += `${L.name}  ring ${run.next + 1}/${L.n}  ${(simTime - run.t0).toFixed(1)}s${b ? `  best ${b.toFixed(2)}s` : ''}\n`;
+  }
+  if (currentMap === 'strike') {
+    const left = a => soldiers.filter(x => x.alive && x.area === a).length, b = bests[STRIKE_KEY];
+    const tm = mission.done ? mission.endT : simTime - mission.t0;
+    t += `TARGETS ${mission.hits}/${soldiers.length}  (town ${left('town')}, forest ${left('forest')} left)\n`;
+    t += `TIME ${fmtTime(tm)}${mission.done ? '  COMPLETE' : ''}${b ? `  best ${fmtTime(b)}` : ''}\n`;
   }
   if (!pad) t += 'No gamepad (move a stick / press a button)\n';
   if (showDebug && pad) {
